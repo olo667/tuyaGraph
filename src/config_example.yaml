@@ -1,0 +1,7 @@
+# Example config for the poller
+device_id: "REPLACE_WITH_DEVICE_ID"
+ip: "192.168.1.100"
+local_key: "REPLACE_WITH_LOCAL_KEY"
+poll_interval_seconds: 30
+csv_path: "data/readings.csv"
+simulate_if_missing: true
