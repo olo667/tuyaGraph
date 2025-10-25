@@ -36,7 +36,3 @@ Project layout (important files):
 - `src/storage.py` — CSV storage read/write helpers.
 - `src/stats.py` — Pluggable statistics registry.
 - `templates/index.html` — Minimal UI using Chart.js.
-
-Next steps I can do for you:
-- Wire up tests and a small smoke test runner.
-- Add Dockerfile and Windows service instructions.
