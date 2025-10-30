@@ -15,6 +15,31 @@
     <div id="chart-container">
       <canvas id="historyChart"></canvas>
     </div>
+    <h2>Daily summary (averaged across days)</h2>
+    <div>
+      <label for="statType">Metric:</label>
+      <select id="statType">
+        <option value="mean">Mean temperature</option>
+        <option value="roc">Rate of change</option>
+      </select>
+
+      <label for="days" style="margin-left:12px">Days to average:</label>
+      <input id="days" type="number" value="30" min="1" style="width:80px" />
+      <label for="resolution" style="margin-left:12px">Resolution (min):</label>
+      <input id="resolution" type="number" value="5" min="1" max="60" style="width:60px" />
+
+      <label for="smoothing" style="margin-left:12px">Smoothing days:</label>
+      <input id="smoothing" type="number" value="1" min="1" style="width:60px" />
+
+      <label for="kernel" style="margin-left:12px">Kernel (optional):</label>
+      <input id="kernel" type="text" placeholder="-0.5,-0.5,0.5,0.5" style="width:180px" />
+
+      <button id="loadStat">Load</button>
+    </div>
+    <div id="mean-day-chart-container" style="max-width:900px; margin-top:16px">
+      <canvas id="meanDayChart"></canvas>
+    </div>
+    <div id="meanWarning" style="color:darkorange; margin-top:8px"></div>
     <p>
       <button id="refresh">Refresh</button>
     </p>
@@ -24,6 +49,14 @@
       let chart = new Chart(ctx, {
         type: 'line',
         data: { labels: [], datasets: [{ label: 'Temperature (°C)', data: [], borderColor: 'blue', fill: false }] },
+        options: { scales: { x: { display: true }, y: { beginAtZero: false } } }
+      });
+
+      // Mean-day chart
+      const ctx2 = document.getElementById('meanDayChart').getContext('2d');
+      let meanChart = new Chart(ctx2, {
+        type: 'line',
+        data: { labels: [], datasets: [{ label: 'Mean temp by hour (°C)', data: [], borderColor: 'red', fill: false }] },
         options: { scales: { x: { display: true }, y: { beginAtZero: false } } }
       });
 
@@ -37,9 +70,133 @@
         chart.update();
       }
 
-      document.getElementById('refresh').addEventListener('click', loadData);
-      // initial load
-      loadData();
+      const transformsMap = {};
+
+      async function loadTransforms() {
+        try {
+          const r = await fetch('/api/transforms');
+          const list = await r.json();
+          const sel = document.getElementById('statType');
+          sel.innerHTML = '';
+          list.forEach(t => {
+            const opt = document.createElement('option');
+            opt.value = t.name;
+            opt.text = t.name;
+            sel.appendChild(opt);
+            transformsMap[t.name] = t.meta || {};
+          });
+        } catch (e) {
+          console.warn('Could not load transforms', e);
+        }
+      }
+
+      async function loadStat() {
+        const type = document.getElementById('statType').value || 'mean';
+        const days = document.getElementById('days').value || '30';
+        const resolution = document.getElementById('resolution').value || '5';
+        const smoothing = document.getElementById('smoothing').value || '1';
+        const kernel = document.getElementById('kernel').value || '';
+        const minFrac = document.getElementById('minFraction') ? document.getElementById('minFraction').value : null;
+
+        const meta = transformsMap[type] || {};
+        let url = null;
+        if (meta && meta.endpoint) {
+          url = meta.endpoint;
+          const params = new URLSearchParams();
+          // map known UI controls to param names
+          (meta.params || []).forEach(p => {
+            if (p === 'days') params.set('days', days);
+            else if (p === 'resolution_minutes') params.set('resolution_minutes', resolution);
+            else if (p === 'smoothing_days') params.set('smoothing_days', smoothing);
+            else if (p === 'kernel' && kernel) params.set('kernel', kernel);
+            else if (p === 'min_sample_fraction' && minFrac) params.set('min_sample_fraction', minFrac);
+            // start/end not supported in UI yet
+          });
+          const qs = params.toString();
+          if (qs) url += (url.includes('?') ? '&' : '?') + qs;
+        } else {
+          // fallback: call generic /api/stats?stat=name
+          url = '/api/stats?stat=' + encodeURIComponent(type);
+        }
+
+        const res = await fetch(url);
+        const payload = await res.json();
+        if (payload.error) {
+          alert('Error: ' + payload.error);
+          return;
+        }
+
+        const warnEl = document.getElementById('meanWarning');
+        // Render mean temperature
+        if (type === 'mean' || type === 'mean-day') {
+          const labels = payload.series.map(s => s.label);
+          const data = payload.series.map(s => s.avg);
+          meanChart.options.scales.y.title = { display: true, text: 'Temperature (°C)' };
+          meanChart.data.labels = labels;
+          meanChart.data.datasets[0].data = data;
+          meanChart.data.datasets[0].label = 'Mean temp by hour (°C)';
+          meanChart.update();
+          if (payload.warnings && payload.warnings.length) {
+            let html = '<strong>Warning:</strong> some days have very few samples — details below:';
+            html += '<ul>' + payload.warnings.map(w => `<li>${w.day}: ${w.message} (samples=${w.samples}, expected=${w.expected})</li>`).join('') + '</ul>';
+            warnEl.innerHTML = html;
+            console.warn('mean-day warnings', payload.warnings);
+          } else {
+            warnEl.textContent = '';
+          }
+          return;
+        }
+
+        // Render rate-of-change: compute average across days for each grid point
+        if (type === 'roc' || type === 'rate-of-change' || (meta && meta.endpoint && meta.endpoint.includes('rate-of-change'))) {
+          const grid = payload.grid_minutes || [];
+          // labels: HH:MM
+          const labels = grid.map(m => {
+            const hh = Math.floor(m / 60) % 24;
+            const mm = Math.floor(m % 60);
+            return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
+          });
+          // payload.per_day: [{day, series_per_hour: [...]}]
+          const perDay = payload.per_day || [];
+          const buckets = grid.length;
+          const sums = new Array(buckets).fill(0);
+          const counts = new Array(buckets).fill(0);
+          perDay.forEach(d => {
+            if (!d.series_per_hour) return;
+            for (let i = 0; i < buckets; i++) {
+              const v = d.series_per_hour[i];
+              if (v !== null && v !== undefined && !isNaN(v)) {
+                sums[i] += v;
+                counts[i] += 1;
+              }
+            }
+          });
+          const avgSeries = sums.map((s, i) => counts[i] ? s / counts[i] : null);
+
+          meanChart.options.scales.y.title = { display: true, text: 'Rate of change (°C/hour)' };
+          meanChart.data.labels = labels;
+          meanChart.data.datasets[0].data = avgSeries;
+          meanChart.data.datasets[0].label = 'Rate of change (°C/hour)';
+          meanChart.update();
+
+          // show warnings
+          if (payload.warnings && payload.warnings.length) {
+            let html = '<strong>Warning:</strong> some days have very few samples — details below:';
+            html += '<ul>' + payload.warnings.map(w => `<li>${w.day}: ${w.message} (samples=${w.samples}, expected=${w.expected})</li>`).join('') + '</ul>';
+            warnEl.innerHTML = html;
+            console.warn('roc warnings', payload.warnings);
+          } else {
+            warnEl.textContent = '';
+          }
+        }
+      }
+
+  document.getElementById('refresh').addEventListener('click', loadData);
+  document.getElementById('loadStat').addEventListener('click', loadStat);
+  // initial load
+  loadData();
+  // load available transforms and initial stats
+  loadTransforms().then(() => loadStat()).catch(e => console.warn('loadTransforms failed', e));
     </script>
   </body>
 </html>

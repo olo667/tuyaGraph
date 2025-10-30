@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -74,16 +75,61 @@ class Poller:
                     return None
 
                 # Try common keys - user may need to adapt mapping for their device
-                # Search for a numeric value in the status payload
+                # Search for a numeric value in the status payload, but ignore
+                # numeric values that are actually error codes (keys like err/error/code).
                 if isinstance(data, dict):
-                    # Flatten and search for numeric values
-                    for k, v in data.items():
+                    # Pattern to detect error-like keys (err, error, code, etc.)
+                    error_pattern = re.compile(r"\b(err(?:or)?|error|code)\b", re.I)
+
+                    def find_numeric(obj):
+                        """Recursively find the first numeric value in obj while skipping
+                        dictionary keys that match error_pattern.
+                        Returns a float or None.
+                        """
+                        # dict: iterate items but skip keys that look like errors
+                        if isinstance(obj, dict):
+                            for kk, vv in obj.items():
+                                try:
+                                    if isinstance(kk, str) and error_pattern.search(kk):
+                                        logger.debug("Skipping error-like key %s -> %s", kk, vv)
+                                        continue
+                                except Exception:
+                                    # defensive: if key isn't str or regex fails, ignore
+                                    pass
+
+                                res = find_numeric(vv)
+                                if res is not None:
+                                    return res
+                            return None
+
+                        # list/tuple: search elements
+                        if isinstance(obj, (list, tuple)):
+                            for item in obj:
+                                res = find_numeric(item)
+                                if res is not None:
+                                    return res
+                            return None
+
+                        # scalar: try to convert to float
                         try:
-                            fv = float(v)
-                            logger.debug("Interpreted key %s -> %s", k, fv)
-                            return fv
+                            # guard against None, booleans, etc.
+                            if obj is None:
+                                return None
+                            # strings may contain whitespace
+                            if isinstance(obj, str):
+                                s = obj.strip()
+                                # avoid interpreting empty strings
+                                if s == "":
+                                    return None
+                                return float(s)
+                            return float(obj)
                         except Exception:
-                            logger.debug("Skipping non-numeric key %s -> %s", k, v)
+                            return None
+
+                    fv = find_numeric(data)
+                    if fv is not None:
+                        logger.debug("Interpreted numeric value from device response -> %s", fv)
+                        return fv
                 else:
                     logger.debug("Device returned non-dict status: %s", type(data))
                 return None
