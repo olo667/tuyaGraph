@@ -5,3 +5,11 @@ local_key: "REPLACE_WITH_LOCAL_KEY"
 poll_interval_seconds: 30
 csv_path: "data/readings.csv"
 simulate_if_missing: true
+
+# Shelly Uni integration: set to enabled and choose mode.
+# mode: 'webhook' (recommended) or 'ws' (websocket - not implemented here)
+shelly_integration:
+	enabled: false
+	mode: "webhook"
+	# webhook_path is the server path Shelly should POST to (default below)
+	webhook_path: "/api/shelly/webhook"

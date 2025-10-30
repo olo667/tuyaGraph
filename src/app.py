@@ -2,13 +2,14 @@ import asyncio
 import logging
 import sys
 import yaml
+import re
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
 
-from .storage import read_readings, compress_old_data
+from .storage import read_readings, compress_old_data, append_reading
 from .stats import compute_all, mean_temperature_across_days_hourly, compute_rate_of_change, list_transforms, call_registered
 from datetime import datetime, timedelta
 from .poller import Poller
@@ -123,6 +124,118 @@ async def api_stats(limit: int = 0, stat: str = None):
             return JSONResponse({"error": str(e)}, status_code=500)
     stats = compute_all(rows)
     return JSONResponse(stats)
+
+
+@app.post("/api/shelly/webhook")
+async def shelly_webhook(request: Request):
+    """Accept HTTP POSTs from a Shelly Uni (or similar) device and append a reading.
+
+    The endpoint will try to parse JSON (or form) payloads and recursively search for the
+    first numeric value it can find. If a timestamp field is present (`timestamp`, `time`, `ts`)
+    it will be used (accepts ISO string or epoch seconds), otherwise the server's UTC
+    now() will be used.
+    """
+    cfg = load_config()
+    csv_path = cfg.get("csv_path", "data/readings.csv")
+
+    # Read payload (accept JSON or form data)
+    data = None
+    try:
+        data = await request.json()
+    except Exception:
+        try:
+            form = await request.form()
+            data = dict(form)
+        except Exception:
+            # fallback: try raw body
+            body = await request.body()
+            try:
+                # attempt to decode as text
+                text = body.decode("utf-8") if body else ""
+                # if it's a simple number
+                if text.strip() != "":
+                    try:
+                        val = float(text.strip())
+                        data = val
+                    except Exception:
+                        data = text
+            except Exception:
+                data = None
+
+    if data is None:
+        return JSONResponse({"error": "invalid or empty payload"}, status_code=400)
+
+    # Recursive search for numeric value (mirrors poller heuristic)
+    error_pattern = re.compile(r"\b(err(?:or)?|error|code)\b", re.I)
+
+    def find_numeric(obj):
+        # dict: search values but skip error-like keys
+        if isinstance(obj, dict):
+            for kk, vv in obj.items():
+                try:
+                    if isinstance(kk, str) and error_pattern.search(kk):
+                        continue
+                except Exception:
+                    pass
+                res = find_numeric(vv)
+                if res is not None:
+                    return res
+            return None
+
+        if isinstance(obj, (list, tuple)):
+            for item in obj:
+                res = find_numeric(item)
+                if res is not None:
+                    return res
+            return None
+
+        try:
+            if obj is None:
+                return None
+            if isinstance(obj, str):
+                s = obj.strip()
+                if s == "":
+                    return None
+                return float(s)
+            return float(obj)
+        except Exception:
+            return None
+
+    value = find_numeric(data)
+    if value is None:
+        return JSONResponse({"error": "no numeric value found in payload"}, status_code=400)
+
+    # Try to extract timestamp if provided
+    ts = None
+    if isinstance(data, dict):
+        for key in ("timestamp", "time", "ts"):
+            v = data.get(key)
+            if v:
+                try:
+                    if isinstance(v, (int, float)):
+                        ts = datetime.utcfromtimestamp(float(v))
+                        break
+                    else:
+                        ts = datetime.fromisoformat(str(v))
+                        break
+                except Exception:
+                    try:
+                        ts = datetime.utcfromtimestamp(float(v))
+                        break
+                    except Exception:
+                        pass
+
+    if ts is None:
+        ts = datetime.utcnow()
+
+    # Append to storage
+    try:
+        await append_reading(csv_path, ts, float(value))
+    except Exception:
+        logging.exception("Failed to append reading from shelly webhook")
+        return JSONResponse({"error": "failed to store reading"}, status_code=500)
+
+    return JSONResponse({"status": "ok", "value": float(value), "timestamp": ts.isoformat()})
 
 
 @app.get("/api/transforms")
