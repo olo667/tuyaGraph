@@ -7,7 +7,7 @@ Quick start (Windows PowerShell):
 1. Create a virtualenv and activate it:
 
 ```powershell
-python -m venv .venv; .\.venv\Scripts\Activate.ps1
+python -m venv .venv; .\.venv\Scripts\activate.bat
 ```
 
 2. Install dependencies:
@@ -29,6 +29,7 @@ uvicorn src.app:app --reload --host 0.0.0.0 --port 8000
 Notes:
 - If you don't have tinytuya-compatible device details yet, the poller will fall back to a simulated sensor. Replace with real credentials in `src/config.yaml`.
 - Data is appended to `data/readings.csv` by default.
+- Old data is compressed, keeping daily frequencies of highest amplitudes.
 
 Project layout (important files):
 - `src/app.py` — FastAPI application and background startup.

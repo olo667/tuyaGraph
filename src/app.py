@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
 
-from .storage import read_readings
+from .storage import read_readings, compress_old_data
 from .stats import compute_all
 from .poller import Poller
 
@@ -26,6 +26,7 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR.parent / "static")), nam
 
 _poller_task = None
 _poller = None
+_compressor_task = None
 
 
 def load_config(path: Path = None) -> dict:
@@ -51,6 +52,29 @@ async def startup_event():
     _poller = Poller(device_id or "", ip or "", local_key or "", csv_path, interval, simulate)
     _poller_task = asyncio.create_task(_poller.start())
     LOG.info("Poller background task started")
+    # Start compressor background task (runs once every 24 hours)
+    global _compressor_task
+    # Read simple compression settings from config, with sensible defaults
+    comp_days = int(cfg.get("compress_days_older_than", 7))
+    comp_keep = int(cfg.get("compress_keep", 10))
+    comp_resample = int(cfg.get("compress_resample_minutes", 1))
+    # Background loop
+    async def _compress_loop():
+        try:
+            while True:
+                try:
+                    LOG.info("Running daily compression: days_older_than=%s keep=%s", comp_days, comp_keep)
+                    await compress_old_data(csv_path, days_older_than=comp_days, keep=comp_keep, resample_minutes=comp_resample)
+                except Exception:
+                    LOG.exception("Error during compression run")
+                # Sleep 24 hours
+                await asyncio.sleep(24 * 3600)
+        except asyncio.CancelledError:
+            LOG.info("Compression background task cancelled")
+            raise
+
+    _compressor_task = asyncio.create_task(_compress_loop())
+    LOG.info("Compressor background task started")
 
 
 @app.on_event("shutdown")
@@ -60,6 +84,13 @@ async def shutdown_event():
         _poller.stop()
     if _poller_task:
         await _poller_task
+    global _compressor_task
+    if _compressor_task:
+        _compressor_task.cancel()
+        try:
+            await _compressor_task
+        except asyncio.CancelledError:
+            pass
 
 
 @app.get("/", response_class=HTMLResponse)

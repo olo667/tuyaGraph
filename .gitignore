@@ -5,3 +5,7 @@ __pycache__/
 data/
 src/config.yaml
 *.log
+devices.json
+snapshot.json
+tinytuya.json
+tuya-raw.json
